@@ -28,6 +28,63 @@ make release        # 编译所有平台
 
 模板没有 `.jpg`、`.pdf`、`.html` 或 `.json` 扩展名时，下载器会使用默认扩展名作为临时文件名，并根据实际媒体类型保存最终文件。
 
+### CADAL 阅读器
+
+CADAL 阅读器页面可直接使用普通 URL 模式下载，程序会从阅读器接口获取图像路径并按页保存为 JPG。需要使用已登录 CADAL 会话导出的 Cookie：
+
+推荐使用浏览器开发者工具复制 Cookie 请求头：
+
+1. 登录 CADAL 并打开图书页面，按 `F12` 打开开发者工具。
+2. 进入 **Network/网络**，刷新页面，选择 `reader.shtml` 或 `api/addr` 请求。
+3. 在 **Headers → Request Headers → Cookie** 中复制完整内容。
+4. 保存为 `header.txt`，格式如下：
+
+```text
+Cookie: cadalreader=...; JSESSIONID=...; userAuth=...; userid=...
+```
+
+使用 `-H` 指定请求头文件：
+
+```shell
+bookget -i 'https://cadal.edu.cn/cx/reader/reader/book/reader.shtml?channel=4&code=a1c54a8f1fac9377e3ec403720a5712c&epage=-1&ipinside=0&netuser=0&spage=1&ssno=06707067&userid=901685591&bookType=2' -H header.txt
+```
+
+多个 CADAL 页面也可以放入文本文件后使用普通批量模式：
+
+```shell
+bookget -I cadal_urls.txt -H header.txt
+```
+
+也可以使用浏览器扩展导出 `cookies.txt`，但应选择 Netscape 格式，不能直接使用 JSON 格式。使用 Cookie 文件时改用 `-C cookie.txt`；如果导出文件导致未授权，建议改用上面的 `header.txt` 方法。
+
+`-H` 和 `-C` 指定的文件会作用于本次运行中的所有请求。下载不同网站时不要复用 CADAL 的请求头或 Cookie，应为每个网站分别保存文件并通过参数指定。
+
+使用 `-i` 或直接启动程序后输入 URL 时，下载内容会先保存到 `-O` 指定目录下按书籍标识创建的独立子目录中，不会直接写入 `downloads` 根目录。
+
+### 山东大学图书馆特藏资源
+
+山东大学特藏详情页（例如 `https://tclib.sdu.edu.cn/portal-tsxq.html?id=3638`）的书目信息和目录接口可以公开访问，但阅读图像接口要求登录。程序会自动调用详情页接口、阅读权限接口，并按阅读器返回的页序下载 `large.jpg` 图像。
+
+先在浏览器中登录山东大学图书馆，再从开发者工具 **Network/网络 → Request Headers → Cookie** 复制 Cookie 请求头，保存为单独的 `sdu-header.txt`：
+
+```text
+Cookie: userId=...; permissionLevel=...; 其他会话Cookie=...
+```
+
+然后使用普通 URL 模式下载：
+
+```shell
+bookget -i 'https://tclib.sdu.edu.cn/portal-tsxq.html?id=3638' -H sdu-header.txt
+```
+
+也可以将浏览器导出的 Netscape 格式 `cookies.txt` 通过 `-C` 传入：
+
+```shell
+bookget -i 'https://tclib.sdu.edu.cn/portal-tsxq.html?id=3638' -C sdu-cookies.txt
+```
+
+图像会保存到 `downloads` 下按 URL 生成的独立目录中。若提示“未找到 userId”或“用户无权访问”，说明 Cookie 已过期、缺少 `userId`，或当前账号没有该书的阅读权限；不要把 Cookie 内容提交到公开仓库或聊天记录中。
+
 # 新書推薦
 
 本書即以清代避諱為例，試探如何運用融合數位與傳統的e考據之法，重新定義避諱學2.0該有的研究模式。這將是治清代的文史工作者案頭不可或缺的一本專著。[^1]

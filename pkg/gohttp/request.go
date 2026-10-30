@@ -274,12 +274,17 @@ func (r *Request) parseCookieFile() {
 	}
 	mHeader := strings.Split(string(bsHeader), "\n")
 	for _, line := range mHeader {
-		if strings.HasPrefix(line, "#") {
+		// Netscape cookie files have seven tab-separated fields.  HttpOnly
+		// entries are prefixed with #HttpOnly_ on the domain field and remain
+		// usable cookies after removing that marker.
+		if strings.HasPrefix(line, "#HttpOnly_") {
+			line = strings.TrimPrefix(line, "#HttpOnly_")
+		} else if strings.HasPrefix(line, "#") {
 			continue
 		}
 		text := regexp.MustCompile(`\\"`).ReplaceAllString(line, "\"")
 		row := strings.Split(text, "\t")
-		if len(row) < 8 {
+		if len(row) < 7 {
 			continue
 		}
 		k := strings.ReplaceAll(row[5], "\"", "")

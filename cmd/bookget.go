@@ -35,9 +35,6 @@ func main() {
 		return
 	}
 
-	// 检查更新
-	checkForUpdates()
-
 	// 根据运行模式执行相应操作
 	executeByRunMode(ctx)
 }
@@ -258,6 +255,37 @@ func batchOutputDirectory(baseDirectory, rawURL string) string {
 	return filepath.Join(baseDirectory, fmt.Sprintf("%s-%x", label, hash[:8]))
 }
 
+// directOutputDirectory returns a readable, stable directory for a single URL
+// or interactive download. Prefer an identifier commonly used by book sites;
+// use the path when no such identifier exists, and always add a URL hash so
+// distinct query strings cannot collide.
+func directOutputDirectory(baseDirectory, rawURL string) string {
+	u, err := neturl.Parse(rawURL)
+	label := "url"
+	if err == nil {
+		label = u.Host
+		for _, key := range []string{"title", "ssno", "fid", "bid", "identifier", "id", "code"} {
+			if value := strings.TrimSpace(u.Query().Get(key)); value != "" {
+				label += "-" + key + "-" + value
+				break
+			}
+		}
+		if label == u.Host {
+			label += u.EscapedPath()
+		}
+	}
+	label = sanitizeBatchDirectoryName(label)
+	if label == "" {
+		label = "url"
+	}
+	labelRunes := []rune(label)
+	if len(labelRunes) > 72 {
+		label = string(labelRunes[:72])
+	}
+	hash := sha256.Sum256([]byte(rawURL))
+	return filepath.Join(baseDirectory, fmt.Sprintf("%s-%x", label, hash[:8]))
+}
+
 func sanitizeBatchDirectoryName(name string) string {
 	var b strings.Builder
 	lastWasSeparator := false
@@ -300,6 +328,17 @@ func processURL(ctx context.Context, rawUrl string) error {
 		return fmt.Errorf("URL解析失败: %w", err)
 	}
 
+	// Keep single URL and interactive downloads separate as well. Routers write
+	// through the global config directory, so scope it to this URL and restore
+	// it after the router finishes.
+	oldDirectory := config.Conf.Directory
+	config.Conf.Directory = directOutputDirectory(oldDirectory, rawURL)
+	defer func() { config.Conf.Directory = oldDirectory }()
+	if err := os.MkdirAll(config.Conf.Directory, 0755); err != nil {
+		return fmt.Errorf("创建下载目录失败: %w", err)
+	}
+	log.Printf("保存目录: %s\n", config.Conf.Directory)
+
 	result, err := router.FactoryRouter(u.Host, rawURL)
 	if err != nil {
 		log.Println(err)
@@ -315,23 +354,5 @@ func processURL(ctx context.Context, rawUrl string) error {
 func cleanupCookieFile() {
 	if err := os.Remove(config.Conf.CookieFile); err != nil && !os.IsNotExist(err) {
 		log.Printf("清理cookie文件失败: %v\n", err)
-	}
-}
-
-// checkForUpdates 检查版本更新
-func checkForUpdates() {
-	//刪除舊版多餘目錄 （迭代幾個版本號，可移除此行）
-	_ = os.RemoveAll(config.BookgetHomeDir())
-	latestVersion, updateAvailable, err := versionChecker.CheckForUpdate()
-	if err != nil {
-		log.Printf("版本检查失败: %v\n", err)
-		return
-	}
-
-	if updateAvailable {
-		fmt.Printf("\n新版本可用: %s (当前版本: %s)\n", latestVersion, versionChecker.CurrentVersion)
-		fmt.Printf("请访问 https://github.com/deweizhu/bookget/releases/latest 升级。\n\n")
-	} else if latestVersion != "" {
-		fmt.Printf("当前已是最新版本: %s\n", versionChecker.CurrentVersion)
 	}
 }

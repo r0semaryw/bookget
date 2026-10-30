@@ -313,8 +313,14 @@ func (r *ChinaNlc) doPdfUrl(sUrl, filename string) error {
 		},
 	}
 	resp, err := gohttp.FastGet(r.ctx, pdfUrl, opts)
-	if err != nil || resp.GetStatusCode() != 200 {
-		fmt.Println(err)
+	if err != nil {
+		log.Printf("NLC PDF request failed: %v\n", err)
+	} else if resp == nil {
+		err = errors.New("NLC PDF request returned an empty response")
+		log.Println(err)
+	} else if resp.GetStatusCode() != http.StatusOK {
+		err = fmt.Errorf("NLC PDF request returned HTTP %d", resp.GetStatusCode())
+		log.Println(err)
 	}
 	util.PrintSleepTime(config.Conf.Sleep)
 	fmt.Println()

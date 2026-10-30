@@ -49,6 +49,14 @@ func FactoryRouter(siteID string, sUrl string) (map[string]interface{}, error) {
 		registerRouter("mylib.nlc.cn", app.NewChinaNlc)
 		registerRouter("guji.nlc.cn", app.NewNlcGuji)
 
+		//[中国] CADAL大学数字图书馆国际合作计划
+		registerRouter("cadal.edu.cn", app.NewCadan)
+		registerRouter("www.cadal.edu.cn", app.NewCadan)
+
+		//[中国]山东大学图书馆特藏资源
+		registerRouter("tclib.sdu.edu.cn", app.NewSduTclib)
+		registerRouter("www.tclib.sdu.edu.cn", app.NewSduTclib)
+
 		//[中国]臺灣華文電子書庫
 		registerRouter("taiwanebook.ncl.edu.tw", app.NewHuawen)
 

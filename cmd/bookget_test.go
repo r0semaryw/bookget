@@ -44,6 +44,24 @@ func TestBatchOutputDirectoryIsStableAndDistinct(t *testing.T) {
 	}
 }
 
+func TestDirectOutputDirectoryUsesBookIdentifier(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "downloads")
+	cadalURL := "https://cadal.edu.cn/cx/reader/reader/book/reader.shtml?ssno=06707066&bookType=2"
+	got := directOutputDirectory(base, cadalURL)
+	if !strings.Contains(filepath.Base(got), "cadal.edu.cn-ssno-06707066") {
+		t.Fatalf("CADAL directory = %q, want ssno in directory name", got)
+	}
+	if !strings.HasPrefix(got, base+string(os.PathSeparator)) {
+		t.Fatalf("directory escaped download root: %q", got)
+	}
+	if got != directOutputDirectory(base, cadalURL) {
+		t.Fatalf("same URL produced different directories")
+	}
+	if got == directOutputDirectory(base, cadalURL+"&page=2") {
+		t.Fatalf("different URLs share directory")
+	}
+}
+
 func TestIsValidURL(t *testing.T) {
 	for _, rawURL := range []string{
 		"https://example.com/a",
