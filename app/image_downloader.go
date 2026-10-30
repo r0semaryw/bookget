@@ -2,14 +2,11 @@ package app
 
 import (
 	"bookget/config"
-	"bookget/pkg/chttp"
+	"bookget/pkg/urltemplate"
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
@@ -23,16 +20,12 @@ import (
 	"bookget/pkg/progressbar"
 )
 
-const (
-	minFileSize = 1024 // 最小文件大小(1KB)
-)
-
 type ImageDownloader struct {
 	client            *http.Client
 	reader            *bufio.Reader
-	hasVolPlaceholder bool   // 是否包含[VOL]或[PAGE]占位符
-	hasABPlaceholder  bool   // 是否包含[AB]或[ab]占位符
-	abPlaceholder     string // 存储实际的占位符形式（"[AB]"或"[ab]"）
+	hasVolPlaceholder bool   // 是否包含[VOL]/{{vol}}或{{volume}}占位符
+	hasABPlaceholder  bool   // 是否包含[AB]/[ab]/{{ab}}占位符
+	abPlaceholder     string // 存储实际的占位符形式
 	abIsLowercase     bool   // 占位符是否为小写
 	maxConcurrent     int
 
@@ -74,28 +67,25 @@ func (i *ImageDownloader) Run(rawUrl string) {
 		fmt.Println("输入 'exit' 退出程序")
 
 		// 1. 获取URL模板
-		urlTemplate, err := i.getInput("请输入图片URL模板（必须包含[PAGE]，可选[VOL]和[AB]）: ")
+		urlTemplate, err := i.getInput("请输入URL模板（支持[PAGE]/[VOL]或{{page:04}}/{{vol}}/{{volume}}，可选[AB]/{{ab}}）: ")
 		if err != nil || strings.ToLower(urlTemplate) == "exit" {
 			break
 		}
 
 		// 检查必须包含[PAGE]占位符
-		if !strings.Contains(urlTemplate, "[PAGE]") {
-			fmt.Println("错误: URL模板必须包含[PAGE]占位符")
+		if !urltemplate.HasPage(urlTemplate) {
+			fmt.Println("错误: URL模板必须包含[PAGE]、{{page}}或{{index}}占位符")
 			continue
 		}
 
 		// 检查占位符
-		i.hasVolPlaceholder = strings.Contains(urlTemplate, "[VOL]")
-		i.hasABPlaceholder = strings.Contains(urlTemplate, "[AB]") || strings.Contains(urlTemplate, "[ab]")
+		i.hasVolPlaceholder = urltemplate.HasVolume(urlTemplate)
+		i.hasABPlaceholder = urltemplate.HasAB(urlTemplate)
 
 		// 存储实际的占位符形式
-		if strings.Contains(urlTemplate, "[AB]") {
-			i.abPlaceholder = "[AB]"
-			i.abIsLowercase = false
-		} else if strings.Contains(urlTemplate, "[ab]") {
-			i.abPlaceholder = "[ab]"
-			i.abIsLowercase = true
+		if placeholder, lower, ok := urltemplate.ABPlaceholder(urlTemplate); ok {
+			i.abPlaceholder = placeholder
+			i.abIsLowercase = lower
 		}
 
 		// 2. 获取页码格式化位数
@@ -106,16 +96,16 @@ func (i *ImageDownloader) Run(rawUrl string) {
 		}
 
 		// 3. 获取扩展名（从URL模板中提取或用户指定）
-		ext := filepath.Ext(urlTemplate)
+		ext := urltemplate.Extension(urlTemplate)
 		if ext == "" {
-			ext, err = i.getInput("无法从URL中识别扩展名，请手动输入（如.jpg、.png）: ")
-			if err != nil || ext == "" {
-				fmt.Println("输入错误: 必须指定文件扩展名")
-				continue
+			ext = config.Conf.FileExt
+			if ext == "" {
+				ext = ".jpg"
 			}
 			if !strings.HasPrefix(ext, ".") {
 				ext = "." + ext
 			}
+			fmt.Printf("模板没有文件扩展名，先使用 %s；网页/IIIF 会按实际媒体类型保存。\n", ext)
 		}
 
 		var startVol, endVol int
@@ -268,10 +258,15 @@ func (i *ImageDownloader) downloadPageSmart(urlTemplate, volStr string, page int
 	// 构建页码格式
 	pageNum := fmt.Sprintf("%0"+pageFormat+"d", page)
 
-	// 构建基础URL
-	url := urlTemplate
-	if i.hasVolPlaceholder {
-		url = strings.Replace(url, "[VOL]", volStr, 1)
+	volume, err := strconv.Atoi(volStr)
+	if err != nil {
+		fmt.Printf("[err=template-volume]+%v\n", err)
+		return
+	}
+	url, err := urltemplate.Render(urlTemplate, page, volume, pageFormat)
+	if err != nil {
+		fmt.Printf("[err=template-render]+%v\n", err)
+		return
 	}
 
 	if i.hasABPlaceholder {
@@ -282,9 +277,9 @@ func (i *ImageDownloader) downloadPageSmart(urlTemplate, volStr string, page int
 		}
 
 		// 构建A面URL
-		urlA := strings.Replace(url, "[PAGE]", pageNum, 1)
+		urlA := url
 		urlA = strings.Replace(urlA, i.abPlaceholder, abSuffix, 1)
-		err := i.downloadAndValidate(urlA, filepath.Join(dirPath, fmt.Sprintf("%s%s%s", pageNum, abSuffix, ext)), globalBar, totalDownloaded)
+		err = i.downloadAndValidate(urlA, filepath.Join(dirPath, fmt.Sprintf("%s%s%s", pageNum, abSuffix, ext)), globalBar, totalDownloaded)
 
 		if err == nil {
 			// 如果A面存在，下载B面
@@ -293,7 +288,7 @@ func (i *ImageDownloader) downloadPageSmart(urlTemplate, volStr string, page int
 				abSuffix = "b"
 			}
 
-			urlB := strings.Replace(url, "[PAGE]", pageNum, 1)
+			urlB := url
 			urlB = strings.Replace(urlB, i.abPlaceholder, abSuffix, 1)
 			err = i.downloadAndValidate(urlB, filepath.Join(dirPath, fmt.Sprintf("%s%s%s", pageNum, abSuffix, ext)), globalBar, totalDownloaded)
 			if err != nil {
@@ -301,7 +296,7 @@ func (i *ImageDownloader) downloadPageSmart(urlTemplate, volStr string, page int
 				return
 			}
 		} else {
-			urlPlain := strings.Replace(url, "[PAGE]", pageNum, 1)
+			urlPlain := url
 			urlPlain = strings.Replace(urlPlain, i.abPlaceholder, "", 1)
 			s := filepath.Join(dirPath, fmt.Sprintf("%s%s", pageNum, ext))
 			err = i.downloadAndValidate(urlPlain, s, globalBar, totalDownloaded)
@@ -312,8 +307,8 @@ func (i *ImageDownloader) downloadPageSmart(urlTemplate, volStr string, page int
 		}
 
 	} else {
-		urlPlain := strings.Replace(url, "[PAGE]", pageNum, 1)
-		err := i.downloadAndValidate(urlPlain, filepath.Join(dirPath, fmt.Sprintf("%s%s", pageNum, ext)), globalBar, totalDownloaded)
+		urlPlain := url
+		err = i.downloadAndValidate(urlPlain, filepath.Join(dirPath, fmt.Sprintf("%s%s", pageNum, ext)), globalBar, totalDownloaded)
 		if err != nil {
 			fmt.Printf("[err=downloadAndValidate]+%v\n", err)
 			return
@@ -322,58 +317,5 @@ func (i *ImageDownloader) downloadPageSmart(urlTemplate, volStr string, page int
 }
 
 func (i *ImageDownloader) downloadAndValidate(url, filePath string, globalBar *progressbar.ProgressBar, totalDownloaded *int64) error {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", config.Conf.UserAgent)
-	cookies, _ := chttp.ReadCookiesFromFile(config.Conf.CookieFile)
-	if cookies != "" {
-		req.Header.Set("Cookie", cookies)
-	}
-	headers, err := chttp.ReadHeadersFromFile(config.Conf.HeaderFile)
-	if err == nil {
-		for key, value := range headers {
-			req.Header.Set(key, value)
-		}
-	}
-
-	resp, err := i.client.Do(req.WithContext(i.ctx))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return err
-	}
-
-	buf := bytes.NewBuffer(make([]byte, 0, 10*1024*1024))
-	if _, err := io.CopyBuffer(buf, resp.Body, make([]byte, 32*1024)); err != nil { // 32KB缓冲区
-		return err
-	}
-	if buf.Len() < minFileSize {
-		return errors.New("发现0字节文件")
-	}
-
-	//file, err := os.Create(filePath)
-	//if err != nil {
-	//	return err
-	//}
-	//defer file.Close()
-	//
-	//
-	//if _, err := buf.WriteTo(file); err != nil {
-	//	os.Remove(filePath)
-	//	return err
-	//}
-
-	if err := os.WriteFile(filePath, buf.Bytes(), 0644); err != nil {
-		return fmt.Errorf("写入文件失败: %v", err)
-	}
-
-	atomic.AddInt64(totalDownloaded, 1)
-	globalBar.Add(1)
-
-	return nil
+	return i.downloadTemplateResource(url, filePath, globalBar, totalDownloaded)
 }

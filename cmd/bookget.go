@@ -8,16 +8,18 @@ import (
 	"bookget/router"
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log"
-	"net/url"
+	neturl "net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 var (
-	wg             sync.WaitGroup
 	versionChecker = version.NewChecker(
 		config.Version,
 		"deweizhu", // GitHub仓库所有者
@@ -75,14 +77,14 @@ const (
 
 // determineRunMode 确定运行模式
 func determineRunMode() RunMode {
-	if config.Conf.DownloaderMode == 1 {
-		return RunModeInteractiveImage
-	}
 	if config.Conf.DUrl != "" {
 		return RunModeSingleURL
 	}
 	if hasValidURLsFile() {
 		return RunModeBatchURLs
+	}
+	if config.Conf.DownloaderMode == 1 {
+		return RunModeInteractiveImage
 	}
 	return RunModeInteractive
 }
@@ -108,13 +110,20 @@ func executeBatchURLs() {
 		return
 	}
 
-	q := queue.NewConcurrentQueue(int(config.Conf.Threads))
+	concurrency := config.Conf.MaxConcurrent
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	q := queue.NewConcurrentQueue(concurrency)
+	// Each URL gets its own output directory. The router implementations use a
+	// global directory setting, so processURLSet serializes the full router call
+	// while retaining the queue's task lifecycle.
 	if config.Conf.DownloaderMode == 1 {
 		processURLsDownloaderMode(q, allUrls)
 	} else {
 		processURLsManual(q, allUrls)
 	}
-	wg.Wait()
+	q.Wait()
 }
 
 // runInteractiveMode 运行交互模式
@@ -147,8 +156,12 @@ func loadAndFilterURLs(filename string) ([]string, error) {
 
 	lines := strings.Split(string(content), "\n")
 	var urls []string
-	for _, line := range lines {
-		sUrl := strings.TrimSpace(strings.Trim(line, "\r"))
+	for index, line := range lines {
+		sUrl := strings.TrimSpace(line)
+		if index == 0 {
+			// UTF-8 BOMs are common when the list was saved by Windows tools.
+			sUrl = strings.TrimPrefix(sUrl, "\ufeff")
+		}
 		if isValidURL(sUrl) {
 			urls = append(urls, sUrl)
 		}
@@ -162,17 +175,16 @@ func loadAndFilterURLs(filename string) ([]string, error) {
 }
 
 // isValidURL 验证URL是否有效
-func isValidURL(url string) bool {
-	return url != "" && strings.HasPrefix(url, "http")
+func isValidURL(rawURL string) bool {
+	u, err := neturl.ParseRequestURI(rawURL)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 // processURLsDownloaderMode 自动检测模式处理URLs
 func processURLsDownloaderMode(q *queue.ConcurrentQueue, allUrls []string) {
 	for _, v := range allUrls {
-		wg.Add(1)
 		rawURL := v // 创建局部变量供闭包使用
 		q.Go(func() {
-			defer wg.Done()
 			processURLSet("bookget", rawURL)
 		})
 	}
@@ -181,30 +193,86 @@ func processURLsDownloaderMode(q *queue.ConcurrentQueue, allUrls []string) {
 // processURLsManual 手动模式处理URLs
 func processURLsManual(q *queue.ConcurrentQueue, allUrls []string) {
 	for _, v := range allUrls {
-		u, err := url.Parse(v)
+		u, err := neturl.Parse(v)
 		if err != nil {
 			log.Printf("URL解析失败: %s, 错误: %v\n", v, err)
 			continue
 		}
 
-		wg.Add(1)
-		rawURL := v // 创建局部变量供闭包使用
+		rawURL := v      // 创建局部变量供闭包使用
+		siteID := u.Host // 不要在闭包中捕获循环变量 u
 		q.Go(func() {
-			defer wg.Done()
-			processURLSet(u.Host, rawURL)
+			processURLSet(siteID, rawURL)
 		})
 	}
 }
 
 // processURLSet 处理一组URLs
 func processURLSet(siteID string, rawUrl string) {
+	// Most site routers keep per-book state on the router object and write to
+	// config.Conf.Directory.  Keep both pieces isolated for each batch item.
+	batchDirectoryMu.Lock()
+	defer batchDirectoryMu.Unlock()
+
+	oldDirectory := config.Conf.Directory
+	config.Conf.Directory = batchOutputDirectory(oldDirectory, rawUrl)
+	defer func() { config.Conf.Directory = oldDirectory }()
+	if err := os.MkdirAll(config.Conf.Directory, 0755); err != nil {
+		log.Printf("创建批量输出目录失败: %s (%v)\n", rawUrl, err)
+		return
+	}
+
 	result, err := router.FactoryRouter(siteID, rawUrl)
 	if err != nil {
-		log.Println(err)
+		log.Printf("下载失败: %s (%v)\n", rawUrl, err)
 		return
 	}
 	// 使用result
 	_ = result
+}
+
+var batchDirectoryMu sync.Mutex
+
+// batchOutputDirectory returns a stable, filesystem-safe directory for a URL.
+// The short hash keeps URLs that share a path (for example different query
+// parameters) from colliding, while the readable prefix makes the directory
+// useful when browsing downloaded books.
+func batchOutputDirectory(baseDirectory, rawURL string) string {
+	u, err := neturl.Parse(rawURL)
+	label := "url"
+	if err == nil {
+		label = u.Host + u.EscapedPath()
+		if label == "" {
+			label = u.Host
+		}
+	}
+	label = sanitizeBatchDirectoryName(label)
+	if label == "" {
+		label = "url"
+	}
+	labelRunes := []rune(label)
+	if len(labelRunes) > 72 {
+		label = string(labelRunes[:72])
+	}
+	hash := sha256.Sum256([]byte(rawURL))
+	return filepath.Join(baseDirectory, fmt.Sprintf("%s-%x", label, hash[:8]))
+}
+
+func sanitizeBatchDirectoryName(name string) string {
+	var b strings.Builder
+	lastWasSeparator := false
+	for _, r := range name {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '.' || r == '_' || r == '-' {
+			b.WriteRune(r)
+			lastWasSeparator = false
+			continue
+		}
+		if !lastWasSeparator {
+			b.WriteByte('-')
+			lastWasSeparator = true
+		}
+	}
+	return strings.Trim(b.String(), "-._")
 }
 
 // readURLFromInput 从用户输入读取URL
@@ -227,7 +295,7 @@ func processURL(ctx context.Context, rawUrl string) error {
 		return fmt.Errorf("无效的URL: %s", rawUrl)
 	}
 
-	u, err := url.Parse(rawURL)
+	u, err := neturl.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("URL解析失败: %w", err)
 	}
