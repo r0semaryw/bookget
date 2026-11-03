@@ -20,11 +20,12 @@ import (
 	"unicode"
 )
 
-// Shidian uses URLs exported by the site's own reader. The page API requires
-// browser-generated signatures and its SDK decrypts picUrl using a ptoken;
+// Shidian uses URLs exported automatically or manually by the site's reader.
+// The API requires browser-generated signatures; its SDK decrypts picUrl using a ptoken;
 // replaying a Cookie alone is insufficient. Never treat previewPages as a book.
 type Shidian struct {
-	client *http.Client
+	client        *http.Client
+	fetchManifest func(string, string) (shidianManifest, error)
 }
 
 type shidianPage struct {
@@ -34,11 +35,14 @@ type shidianPage struct {
 }
 
 type shidianManifest struct {
-	Format    string        `json:"format"`
-	BookID    string        `json:"bookId"`
-	BookName  string        `json:"bookName"`
-	TotalPage int           `json:"totalPage"`
-	Pages     []shidianPage `json:"pages"`
+	Format     string        `json:"format"`
+	BookID     string        `json:"bookId"`
+	BookName   string        `json:"bookName"`
+	TotalPage  int           `json:"totalPage"`
+	Version    int           `json:"version,omitempty"`
+	SourceURL  string        `json:"sourceUrl,omitempty"`
+	ExportedAt string        `json:"exportedAt,omitempty"`
+	Pages      []shidianPage `json:"pages"`
 }
 
 var shidianBookPath = regexp.MustCompile(`^/(?:zh|en|zh-Hans|zh-Hant|zh-CN|zh-TW)/book/([A-Za-z0-9_-]+)(?:/|$)|^/book/([A-Za-z0-9_-]+)(?:/|$)`)
@@ -51,7 +55,7 @@ func NewShidian() *Shidian {
 		// The existing configuration stores bare numeric seconds as a Duration.
 		timeout *= time.Second
 	}
-	return &Shidian{client: &http.Client{Timeout: timeout}}
+	return &Shidian{client: &http.Client{Timeout: timeout}, fetchManifest: fetchShidianManifest}
 }
 
 func (r *Shidian) GetRouterInit(rawURL string) (map[string]interface{}, error) {
@@ -61,28 +65,18 @@ func (r *Shidian) GetRouterInit(rawURL string) (map[string]interface{}, error) {
 
 func (r *Shidian) Run(rawURL string) (string, error) {
 	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "", err
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil ||
+		(u.Host != "www.shidianguji.com" && u.Host != "shidianguji.com") {
+		return "", errors.New("不是有效的识典古籍书籍 URL")
 	}
 	matches := shidianBookPath.FindStringSubmatch(u.Path)
 	if len(matches) == 0 {
 		return "", errors.New("识典古籍 URL 应为 /book/<书籍ID> 或 /book/<书籍ID>/chapter/<章节ID>")
 	}
 	bookID := matches[1] + matches[2]
-	filename := config.Conf.ShidianPages
-	if filename == "" {
-		return "", errors.New("识典古籍需要浏览器导出的图像清单：在阅读页运行 scripts/shidian-export.js，再用 --shidian-pages <书籍ID>.json 下载；仅提供 Cookie 无法完成动态签名和图像地址解码，详见 README")
-	}
-	if stat, err := os.Stat(filename); err == nil && stat.IsDir() {
-		filename = filepath.Join(filename, bookID+".json")
-	}
-	data, err := os.ReadFile(filename)
+	manifest, err := r.loadManifest(rawURL, bookID)
 	if err != nil {
-		return "", fmt.Errorf("读取识典古籍清单: %w", err)
-	}
-	var manifest shidianManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return "", fmt.Errorf("解析识典古籍清单: %w", err)
+		return "", err
 	}
 	pages, err := validateShidianManifest(manifest, bookID)
 	if err != nil {
@@ -123,6 +117,57 @@ func (r *Shidian) Run(rawURL string) (string, error) {
 		return "", fmt.Errorf("识典古籍 %d/%d 页下载失败，可重新运行续传: %w", failed, selected, firstErr)
 	}
 	return savePath, nil
+}
+
+func (r *Shidian) loadManifest(rawURL, bookID string) (shidianManifest, error) {
+	var manifest shidianManifest
+	filename := config.Conf.ShidianPages
+	if filename != "" {
+		if stat, err := os.Stat(filename); err == nil && stat.IsDir() {
+			filename = filepath.Join(filename, bookID+".json")
+		}
+		data, err := os.ReadFile(filename)
+		if err != nil {
+			return manifest, fmt.Errorf("读取识典古籍清单: %w", err)
+		}
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			return manifest, fmt.Errorf("解析识典古籍清单: %w", err)
+		}
+		return manifest, nil
+	}
+	log.Printf("识典古籍：正在自动获取 %s 的完整扫描页清单", bookID)
+	manifest, err := r.fetchManifest(rawURL, bookID)
+	if err != nil {
+		return manifest, err
+	}
+	if _, err := validateShidianManifest(manifest, bookID); err != nil {
+		return manifest, err
+	}
+	// Always refresh automatically: cached CDN signatures expire. Keep the last
+	// complete manifest for manual reuse, and never replace it with partial data.
+	dir := filepath.Join(config.Conf.Directory, ".shidian-pages")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return manifest, err
+	}
+	f, err := os.CreateTemp(dir, ".manifest-*.json")
+	if err != nil {
+		return manifest, err
+	}
+	defer os.Remove(f.Name())
+	encodeErr := json.NewEncoder(f).Encode(manifest)
+	closeErr := f.Close()
+	if encodeErr != nil {
+		return manifest, encodeErr
+	}
+	if closeErr != nil {
+		return manifest, closeErr
+	}
+	filename = filepath.Join(dir, bookID+".json")
+	if err := os.Rename(f.Name(), filename); err != nil {
+		return manifest, err
+	}
+	log.Printf("识典古籍：已取得 %d 页，清单保存至 %s", manifest.TotalPage, filename)
+	return manifest, nil
 }
 
 func validateShidianManifest(m shidianManifest, bookID string) ([]shidianPage, error) {
@@ -230,7 +275,7 @@ func (r *Shidian) downloadPageOnce(rawURL, referer, base string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("图像服务器返回 HTTP %d；若签名过期，请在浏览器重新导出清单", resp.StatusCode)
+		return fmt.Errorf("图像服务器返回 HTTP %d；若签名过期，请重新运行自动模式，或在浏览器重新导出手工清单", resp.StatusCode)
 	}
 	f, err := os.CreateTemp(filepath.Dir(base), ".shidian-*.part")
 	if err != nil {

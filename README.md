@@ -89,33 +89,63 @@ bookget -i 'https://tclib.sdu.edu.cn/portal-tsxq.html?id=3638' -C sdu-cookies.tx
 
 支持 `https://www.shidianguji.com/book/<书籍ID>` 及其 `/chapter/<章节ID>` 阅读链接，下载该书全部扫描页。章节链接也按整书处理；只下载部分页时使用 `-p 起始页:结束页`，页码为全书扫描页序号。
 
-识典的图像接口需要浏览器动态签名，并由网页 SDK 解码图像地址，单独提供 `-H` / `-C` Cookie 不能代替这一步。因此需要先在浏览器导出图像清单，再交给 bookget 下载：
+默认自动取得整书图像清单，再下载扫描图。程序会查找本机安装的 Chrome、Chromium 或 Edge，使用独立浏览器会话调用网页自身的签名和图像地址解码组件；无需安装 Python/Playwright，也不需要手工运行导出脚本。
+
+```shell
+# 自动获取清单并下载整书
+./bookget-linux -i 'https://www.shidianguji.com/book/NCL11566A/chapter/1lyxbeutoq9ta'
+
+# 仅下载全书扫描页的第 1 至 3 页（仍校验整书清单）
+./bookget-linux -i 'https://www.shidianguji.com/book/NCL11566A' -p 1:3
+
+# 交互输入 URL；输入识典链接时同样自动获取清单
+./bookget-linux
+
+# 多本书：按各自链接自动取得清单，继续沿用独立目录和续传
+./bookget-linux -I shidian_urls.txt
+```
+
+默认先尝试无界面浏览器；若书籍或扫描页接口返回 `31000`，且当前有桌面环境，就自动切换为可见浏览器重试一次。成功后，本次运行的后续书籍直接沿用可见模式。书签、评论等可选登录功能的失败不会误判成扫描页失败。
+
+也可指定浏览器路径、直接使用可见模式、设置独立登录目录和超时：
+
+```shell
+./bookget-linux -i 'https://www.shidianguji.com/book/NCL11566A' \
+  --shidian-browser /usr/bin/microsoft-edge \
+  --shidian-headed --shidian-browser-profile ./shidian-profile \
+  --shidian-timeout 5m
+```
+
+- `--shidian-browser`：浏览器可执行文件路径，未指定时自动查找；不支持 Firefox。
+- `--shidian-headed`：直接显示浏览器窗口。需要登录/验证的书籍，可配合独立 profile 使用；如果接口报错后窗口立即关闭，请先手动用同一独立 profile 打开浏览器完成登录，再关闭浏览器重试。
+- `--shidian-browser-profile`：保存登录状态的独立用户数据目录。不要使用日常浏览器正在占用的目录；未指定时使用临时目录。
+- `--shidian-timeout`：每次浏览器尝试的总超时，默认 `2m`，也可写 `300s`。包含网页加载、SDK 初始化和取完整清单。
+
+例如 Linux 上先运行 `microsoft-edge --user-data-dir="$(pwd)/shidian-profile" 'https://www.shidianguji.com'`，完成登录并关闭该窗口后，再运行上面的下载命令。
+
+本书《東岡小稿》（`NCL11566A`）共 236 页，可在未登录状态下读取；其他书籍以网页实际权限为准。无浏览器或无桌面环境且站点拒绝无界面访问时，可在另一台有浏览器的电脑上导出清单，再通过 `--shidian-pages` 使用。
+
+**手工清单仍然可用**：指定 `--shidian-pages` 时完全跳过自动浏览器，便于已有清单或外部程序调用。
 
 1. 用浏览器打开目标书籍的阅读页，等待原图加载。若刚从其他书跳转过来，先刷新一次页面。
 2. 打开开发者工具的 **Console/控制台**，运行仓库中的 [scripts/shidian-export.js](scripts/shidian-export.js) 全部内容。
-3. 脚本沿用网页自身的接口和解码器，每批获取 40 页，确认整书页码齐全后下载 `<书籍ID>.json`。例如本书导出 `NCL11566A.json`，共 236 页；未登录状态下也能导出此书。其他书籍以网页实际阅读权限为准。
-4. 使用新编译的 bookget 指定清单路径：
+3. 脚本每批获取 40 页，确认整书页码齐全后下载 `<书籍ID>.json`。
 
 ```shell
-./bookget-linux -i 'https://www.shidianguji.com/book/NCL11566A/chapter/1lyxbeutoq9ta' \
+./bookget-linux -i 'https://www.shidianguji.com/book/NCL11566A' \
   --shidian-pages ./NCL11566A.json
 
-# 仅下载全书扫描页的第 1 至 3 页
-./bookget-linux -i 'https://www.shidianguji.com/book/NCL11566A' \
-  --shidian-pages ./NCL11566A.json -p 1:3
-
-# 交互输入 URL
-./bookget-linux --shidian-pages ./NCL11566A.json
-
-# 多本书：每本先导出清单，以 <书籍ID>.json 放到同一个目录
+# 目录内按 <书籍ID>.json 匹配
 ./bookget-linux -I shidian_urls.txt --shidian-pages ./shidian-pages
 ```
 
 程序在每个 URL 的输出目录中创建 `书名-书籍ID` 子目录，保存为 `0001.png`、`0002.png` 等；根据实际响应也可能保存为 `.jpg`。重新运行相同命令时，已校验完整的文件会跳过，损坏或未完成的页会重新下载。清单与输入 URL 的书籍 ID 不符、缺页、重复页码或响应不是完整图像时会报错。
 
-下载使用阅读器的 `picUrl`，不使用 `thumbUrl` 或仅有少量页的 `previewPages`，不添加缩放/降低画质参数，也不在本地重新编码。得到的是网站提供的扫描图版本，不保证等同于馆藏未压缩的扫描母版；站点可能已裁页或压缩。清单含有时效的图像签名 URL，不含 Cookie 或 `ptoken`，若下载返回 403 等错误，请刷新阅读页重新导出清单后续传。bookget 不会把 `-H` / `-C` 中的站点凭证发送给图像 CDN。
+自动生成的完整清单保存于该 URL 输出目录下的 `.shidian-pages/<书籍ID>.json`，使用仅当前用户可读写的文件权限。每次自动运行都会重新取清单，避免复用过期的图像签名；失败或不完整的清单不会覆盖之前的完整文件。已下载图像的续传判断不受清单刷新影响。
 
-导出器依赖网站当前的 `window._ROUTER_DATA`、`byted_psdk` 和 `/api/ancientlib/read/book/pages/v3/` 接口；若网站改版或要求登录/验证，先在网页正常完成阅读所需步骤，重新导出。直接传入 URL 而没有清单时，程序会提示上述步骤，不会将几张预览图当作整书下载完成。
+下载使用阅读器的 `picUrl`，不使用 `thumbUrl` 或仅有少量页的 `previewPages`，不添加缩放/降低画质参数，也不在本地重新编码。得到的是网站提供的扫描图版本，不保证等同于馆藏未压缩的扫描母版；站点可能已裁页或压缩。清单含有时效的图像签名 URL，不含 Cookie 或 `ptoken`。若下载时签名过期，可重新运行自动模式；手工模式需重新导出清单后续传。
+
+导出器依赖网站当前的 `window._ROUTER_DATA`、`byted_psdk` 和 `/api/ancientlib/read/book/pages/v3/` 接口；若网站改版或要求登录/验证，先在网页确认能够正常阅读。单独提供 `-H` / `-C` Cookie 不能代替动态签名；自动模式的登录状态来自指定的浏览器 profile。bookget 不会把 `-H` / `-C` 中的站点凭证发送给图像 CDN。
 
 # 新書推薦
 

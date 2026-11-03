@@ -4,6 +4,7 @@ import (
 	"bookget/config"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -171,10 +172,75 @@ func TestShidianRejectsErrorBodies(t *testing.T) {
 	}
 }
 
-func TestShidianRequiresBrowserExport(t *testing.T) {
+func TestShidianAutomaticManifestDownloadAndRefresh(t *testing.T) {
 	shidianTestConfig(t)
+	requests := 0
+	body := shidianTestImage(t, "png")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	r := NewShidian()
+	exports := 0
+	r.fetchManifest = func(rawURL, bookID string) (shidianManifest, error) {
+		exports++
+		if bookID != "B1" || rawURL != "https://www.shidianguji.com/book/B1" {
+			t.Fatal("wrong book sent to browser")
+		}
+		return shidianManifest{Format: "bookget-shidian-v1", BookID: bookID, BookName: "书", TotalPage: 2,
+			ExportedAt: fmt.Sprint(exports), Pages: []shidianPage{{PageNum: 2, URL: server.URL + "/2"}, {PageNum: 1, URL: server.URL + "/1"}}}, nil
+	}
+	config.Conf.SeqStart, config.Conf.SeqEnd = 1, 1
+	for i := 0; i < 2; i++ {
+		if _, err := r.Run("https://www.shidianguji.com/book/B1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if exports != 2 || requests != 1 {
+		t.Fatalf("exports=%d image requests=%d", exports, requests)
+	}
+	cache := filepath.Join(config.Conf.Directory, ".shidian-pages", "B1.json")
+	data, err := os.ReadFile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m shidianManifest
+	if err := json.Unmarshal(data, &m); err != nil || m.ExportedAt != "2" || len(m.Pages) != 2 {
+		t.Fatalf("bad saved manifest: %v", err)
+	}
+	// Explicit manifests take priority even when automatic acquisition would fail.
+	r.fetchManifest = func(string, string) (shidianManifest, error) { t.Fatal("manual mode opened browser"); return m, nil }
+	config.Conf.ShidianPages = cache
+	if _, err := r.Run("https://www.shidianguji.com/book/B1"); err != nil {
+		t.Fatal(err)
+	}
+	// A failed/incomplete refresh cannot replace a previous complete manifest.
+	config.Conf.ShidianPages = ""
+	for _, fail := range []bool{false, true} {
+		r.fetchManifest = func(string, string) (shidianManifest, error) {
+			if fail {
+				return shidianManifest{}, errors.New("browser failed")
+			}
+			m.Pages = m.Pages[:1]
+			return m, nil
+		}
+		if _, err := r.Run("https://www.shidianguji.com/book/B1"); err == nil {
+			t.Fatal("accepted failed export")
+		}
+		got, err := os.ReadFile(cache)
+		if err != nil || !bytes.Equal(data, got) {
+			t.Fatal("failed refresh replaced cache")
+		}
+	}
+}
+
+func TestShidianBrowserUnavailable(t *testing.T) {
+	shidianTestConfig(t)
+	t.Setenv("PATH", t.TempDir())
+	config.Conf.ShidianBrowser = filepath.Join(t.TempDir(), "no-browser")
 	_, err := NewShidian().Run("https://www.shidianguji.com/book/B1")
-	if err == nil || !strings.Contains(err.Error(), "--shidian-pages") {
-		t.Fatalf("missing export instructions: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "--shidian-browser") {
+		t.Fatalf("missing setup instructions: %v", err)
 	}
 }

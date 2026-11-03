@@ -14,14 +14,15 @@ function reader(options = {}) {
     window: {
       _ROUTER_DATA: { loaderData: { reader: { bookInfo: { bookId: 'B1', bookName: '测试书', totalPage: total, version: 2 } } } },
       byted_psdk: {
-        getPtokenStatus: async () => 'session-token',
+        getPtokenStatus: async () => options.hungToken ? new Promise(() => {}) : options.slowToken ? new Promise(resolve => setTimeout(() => resolve('session-token'), 30)) : 'session-token',
         decrypt: async (url) => options.decryptFail ? { decrypt: false } : { decrypt: true, data: url.replace('encrypted:', 'https://images.example/') },
       },
     },
     fetch: async (url, init) => {
       const body = JSON.parse(init.body);
       calls.push({ url, ...body });
-      if (options.apiError) return { ok: true, json: async () => ({ errorCode: 40001 }) };
+      if (options.hungFetch) return new Promise(() => {});
+      if (options.apiError) return { ok: true, json: async () => ({ errorCode: options.apiError === true ? 40001 : options.apiError }) };
       const start = (body.pageIndex - 1) * body.pageSize + 1;
       const end = Math.min(body.pageIndex * body.pageSize, total);
       const pages = Array.from({ length: end - start + 1 }, (_, i) => ({
@@ -35,10 +36,49 @@ function reader(options = {}) {
     URL: { createObjectURL: (blob) => { output = blob; return 'blob:export'; }, revokeObjectURL() {} },
     Blob,
     document: { createElement: () => ({ click: () => { downloads++; } }) },
-    setTimeout: (fn) => fn(),
+    AbortController,
+    setTimeout: (fn, ms) => ms === 10000 ? fn() : setTimeout(fn, ms === 500 ? 0 : ms),
+    clearTimeout,
     console: { info() {} },
   };
-  return { run: () => vm.runInNewContext(source, context), calls, output: () => output, downloads: () => downloads };
+  if (options.staleBook) context.window._ROUTER_DATA.loaderData.reader.bookInfo.bookId = 'OLD';
+  return { run: (settings) => vm.runInNewContext(settings ? source.replace('/* BOOKGET_OPTIONS */', JSON.stringify(settings)) : source, context), calls, output: () => output, downloads: () => downloads };
+}
+
+test('automatic mode returns the complete manifest without downloading a blob', async () => {
+  const r = reader();
+  const m = await r.run({ download: false, bookId: 'B1' });
+  assert.equal(m.pages.length, 43);
+  assert.equal(m.pages[42].pageNum, 43);
+  assert.equal(r.downloads(), 0);
+  assert.doesNotMatch(JSON.stringify(m), /session-token|ptoken|thumbnail/);
+});
+
+test('automatic mode propagates API codes for browser fallback', async () => {
+  await assert.rejects(reader({ apiError: 31000 }).run({ download: false }), e => e.code === 31000);
+});
+
+test('rejects stale SSR and mismatched requested book before fetching', async () => {
+  for (const [r, bookId] of [[reader({ staleBook: true }), 'B1'], [reader(), 'OTHER']]) {
+    await assert.rejects(r.run({ download: false, bookId }));
+    assert.equal(r.calls.length, 0);
+  }
+});
+
+test('a late SDK response cannot export a manifest after timeout', async () => {
+  const r = reader({ slowToken: true });
+  await assert.rejects(r.run({ timeout: 10 }), /超时/);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(r.calls.length, 0);
+  assert.equal(r.downloads(), 0);
+});
+
+for (const field of ['hungToken', 'hungFetch']) {
+  test(`times out when ${field} never completes`, async () => {
+    const r = reader({ [field]: true });
+    await assert.rejects(r.run({ download: false, timeout: 20 }), /超时/);
+    assert.equal(r.downloads(), 0);
+  });
 }
 
 test('exports all pages with original URLs, without tokens or thumbnails', async () => {

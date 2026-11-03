@@ -15,11 +15,15 @@ type Input struct {
 	DownloaderMode int  //自动检测下载URL。可选值[0|1|2]，;0=默认;1=通用批量下载（类似IDM、迅雷）;2= IIIF manifest.json 自动检测下载图片
 	UseDzi         bool //启用Dezoomify下载IIIF
 
-	DUrl         string
-	UrlsFile     string //已废弃
-	CookieFile   string //输入 chttp.txt
-	HeaderFile   string //输入 header.txt
-	ShidianPages string //识典古籍浏览器导出的图像清单，或存放清单的目录
+	DUrl                  string
+	UrlsFile              string //已废弃
+	CookieFile            string //输入 chttp.txt
+	HeaderFile            string //输入 header.txt
+	ShidianPages          string //识典古籍浏览器导出的图像清单，或存放清单的目录
+	ShidianBrowser        string //可选的 Chrome/Chromium/Edge 可执行文件
+	ShidianBrowserProfile string //独立浏览器用户数据目录，用于保存登录状态
+	ShidianHeaded         bool
+	ShidianTimeout        time.Duration
 
 	Seq      string //页面范围 4:434
 	SeqStart int
@@ -75,6 +79,10 @@ func Init(ctx context.Context) bool {
 	pflag.StringVarP(&Conf.CookieFile, "cookies", "C", filepath.Join(dir, "cookie.txt"), "cookie 文件")
 	pflag.StringVarP(&Conf.HeaderFile, "headers", "H", filepath.Join(dir, "header.txt"), "header 文件")
 	pflag.StringVar(&Conf.ShidianPages, "shidian-pages", "", "识典古籍图像清单 JSON；也可指定含 <bookId>.json 的目录")
+	pflag.StringVar(&Conf.ShidianBrowser, "shidian-browser", "", "识典自动清单使用的 Chrome/Chromium/Edge 路径，默认自动查找")
+	pflag.StringVar(&Conf.ShidianBrowserProfile, "shidian-browser-profile", "", "识典独立浏览器用户数据目录，保存登录状态")
+	pflag.BoolVar(&Conf.ShidianHeaded, "shidian-headed", false, "识典自动清单直接使用可见浏览器")
+	pflag.DurationVar(&Conf.ShidianTimeout, "shidian-timeout", 2*time.Minute, "识典每次自动获取清单的超时，如 2m 或 300s")
 
 	pflag.IntVarP(&Conf.Threads, "threads", "n", 1, "每任务最大线程数")
 	pflag.IntVarP(&Conf.MaxConcurrent, "concurrent", "c", 16, "最大并发任务数")
