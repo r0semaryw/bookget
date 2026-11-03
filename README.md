@@ -85,6 +85,38 @@ bookget -i 'https://tclib.sdu.edu.cn/portal-tsxq.html?id=3638' -C sdu-cookies.tx
 
 图像会保存到 `downloads` 下按 URL 生成的独立目录中。若提示“未找到 userId”或“用户无权访问”，说明 Cookie 已过期、缺少 `userId`，或当前账号没有该书的阅读权限；不要把 Cookie 内容提交到公开仓库或聊天记录中。
 
+### 识典古籍扫描图
+
+支持 `https://www.shidianguji.com/book/<书籍ID>` 及其 `/chapter/<章节ID>` 阅读链接，下载该书全部扫描页。章节链接也按整书处理；只下载部分页时使用 `-p 起始页:结束页`，页码为全书扫描页序号。
+
+识典的图像接口需要浏览器动态签名，并由网页 SDK 解码图像地址，单独提供 `-H` / `-C` Cookie 不能代替这一步。因此需要先在浏览器导出图像清单，再交给 bookget 下载：
+
+1. 用浏览器打开目标书籍的阅读页，等待原图加载。若刚从其他书跳转过来，先刷新一次页面。
+2. 打开开发者工具的 **Console/控制台**，运行仓库中的 [scripts/shidian-export.js](scripts/shidian-export.js) 全部内容。
+3. 脚本沿用网页自身的接口和解码器，每批获取 40 页，确认整书页码齐全后下载 `<书籍ID>.json`。例如本书导出 `NCL11566A.json`，共 236 页；未登录状态下也能导出此书。其他书籍以网页实际阅读权限为准。
+4. 使用新编译的 bookget 指定清单路径：
+
+```shell
+./bookget-linux -i 'https://www.shidianguji.com/book/NCL11566A/chapter/1lyxbeutoq9ta' \
+  --shidian-pages ./NCL11566A.json
+
+# 仅下载全书扫描页的第 1 至 3 页
+./bookget-linux -i 'https://www.shidianguji.com/book/NCL11566A' \
+  --shidian-pages ./NCL11566A.json -p 1:3
+
+# 交互输入 URL
+./bookget-linux --shidian-pages ./NCL11566A.json
+
+# 多本书：每本先导出清单，以 <书籍ID>.json 放到同一个目录
+./bookget-linux -I shidian_urls.txt --shidian-pages ./shidian-pages
+```
+
+程序在每个 URL 的输出目录中创建 `书名-书籍ID` 子目录，保存为 `0001.png`、`0002.png` 等；根据实际响应也可能保存为 `.jpg`。重新运行相同命令时，已校验完整的文件会跳过，损坏或未完成的页会重新下载。清单与输入 URL 的书籍 ID 不符、缺页、重复页码或响应不是完整图像时会报错。
+
+下载使用阅读器的 `picUrl`，不使用 `thumbUrl` 或仅有少量页的 `previewPages`，不添加缩放/降低画质参数，也不在本地重新编码。得到的是网站提供的扫描图版本，不保证等同于馆藏未压缩的扫描母版；站点可能已裁页或压缩。清单含有时效的图像签名 URL，不含 Cookie 或 `ptoken`，若下载返回 403 等错误，请刷新阅读页重新导出清单后续传。bookget 不会把 `-H` / `-C` 中的站点凭证发送给图像 CDN。
+
+导出器依赖网站当前的 `window._ROUTER_DATA`、`byted_psdk` 和 `/api/ancientlib/read/book/pages/v3/` 接口；若网站改版或要求登录/验证，先在网页正常完成阅读所需步骤，重新导出。直接传入 URL 而没有清单时，程序会提示上述步骤，不会将几张预览图当作整书下载完成。
+
 # 新書推薦
 
 本書即以清代避諱為例，試探如何運用融合數位與傳統的e考據之法，重新定義避諱學2.0該有的研究模式。這將是治清代的文史工作者案頭不可或缺的一本專著。[^1]

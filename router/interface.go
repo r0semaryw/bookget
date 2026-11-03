@@ -57,6 +57,10 @@ func FactoryRouter(siteID string, sUrl string) (map[string]interface{}, error) {
 		registerRouter("tclib.sdu.edu.cn", app.NewSduTclib)
 		registerRouter("www.tclib.sdu.edu.cn", app.NewSduTclib)
 
+		//[中国]识典古籍
+		registerRouter("www.shidianguji.com", app.NewShidian)
+		registerRouter("shidianguji.com", app.NewShidian)
+
 		//[中国]臺灣華文電子書庫
 		registerRouter("taiwanebook.ncl.edu.tw", app.NewHuawen)
 
