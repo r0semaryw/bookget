@@ -4,7 +4,6 @@ import (
 	"bookget/config"
 	"bookget/model/tianyige"
 	"bookget/pkg/gohttp"
-	xhash "bookget/pkg/hash"
 	"bookget/pkg/util"
 	"bytes"
 	"context"
@@ -17,6 +16,10 @@ import (
 	"github.com/andreburgaud/crypt2go/padding"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
+	"image"
+	"image/draw"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"log"
 	"math/rand"
@@ -131,61 +134,269 @@ func (r *Tianyige) do(records []tianyige.ImageRecord) (msg string, err error) {
 	}
 	size := len(records)
 	fmt.Println()
-	var wg sync.WaitGroup
-	idDict := make(map[string]string, 1000)
-	i := 0
-	for _, record := range records {
-		uri, _, err := r.getImageById(record.ImageId)
-		if err != nil || uri == "" || !config.PageRange(i, size) {
+	for i, record := range records {
+		// Keep the global catalog offset independent of -p, so a later volume
+		// still receives the correct page numbers in catalog.txt.
+		r.index++
+		if !config.PageRange(i, size) {
 			continue
 		}
-		i++
-		r.index++
-		sortId := fmt.Sprintf("%04d", i)
-		filename := sortId + config.Conf.FileExt
+		sortId := fmt.Sprintf("%04d", i+1)
+		ext := strings.ToLower(config.Conf.FileExt)
+		if ext != ".png" && ext != ".jpg" && ext != ".jpeg" {
+			ext = ".jpg"
+		}
+		filename := sortId + ext
 		dest := path.Join(r.dt.SavePath, filename)
 		if FileExist(dest) {
 			continue
 		}
-		log.Printf("Get %d/%d  %s\n", i, size, uri)
-		//下载时有验证码
-		ctx := context.Background()
-		opts := gohttp.Options{
-			DestFile:    dest,
-			Overwrite:   false,
-			Concurrency: 1,
-			CookieFile:  config.Conf.CookieFile,
-			HeaderFile:  config.Conf.HeaderFile,
-			CookieJar:   r.dt.Jar,
-			Headers: map[string]interface{}{
-				"User-Agent": config.Conf.UserAgent,
-			},
+		log.Printf("Get %d/%d image %s\n", i+1, size, record.ImageId)
+		body, err := r.downloadImage(record.ImageId)
+		if err != nil {
+			return "", fmt.Errorf("天一阁第 %d 页: %w", i+1, err)
 		}
-		for k := 0; k < 10; k++ {
-			_, err = gohttp.FastGet(ctx, uri, opts)
-			if err == nil && FileExist(dest) {
-				break
-			}
-			WaitNewCookieWithMsg(uri)
-		}
-
-		bs, _ := os.ReadFile(dest)
-		mh := xhash.NewMultiHasher()
-		_, _ = io.Copy(mh, bytes.NewBuffer(bs))
-		kId, _ := mh.SumString(xhash.MD5, false)
-		_, ok := idDict[kId]
-		if ok {
-			fmt.Println()
-			continue
-		} else {
-			idDict[kId] = uri
+		if err := writeDownloadFile(dest, body); err != nil {
+			return "", err
 		}
 		util.PrintSleepTime(config.Conf.Sleep)
 		fmt.Println()
 	}
-	wg.Wait()
 	fmt.Println()
 	return "", err
+}
+
+// downloadImage follows the current Tianyige reader protocol.  Each logical
+// page is stored as 6, 8, 9 or 12 physical image slices.  The browser asks
+// for a short-lived server timestamp, signs "slice.fileInfoId.timestamp" with
+// the site's Base58 variant, then stitches the returned JPEGs in a grid.
+func (r *Tianyige) downloadImage(imageID string) ([]byte, error) {
+	files, err := r.queryImageFiles(imageID)
+	if err != nil {
+		return nil, err
+	}
+	var source *tianyige.FileInfo
+	for i := range files {
+		if !strings.Contains(files[i].FileOldname, "_c") {
+			source = &files[i]
+			break
+		}
+	}
+	if source == nil && len(files) > 0 {
+		source = &files[0]
+	}
+	if source == nil {
+		return nil, errors.New("没有原始图像文件")
+	}
+
+	// Older deployments returned a complete file path.  Keep this fallback so
+	// existing Tianyige URLs remain usable while the current split-file API is
+	// handled below.
+	if source.FileInfoId == "" {
+		if source.FilePath == "" || source.FileName == "" {
+			return nil, errors.New("图像文件缺少 fileInfoId 或文件路径")
+		}
+		uri := fmt.Sprintf("https://%s/fileUpload/%s/%s", r.dt.UrlParsed.Host, source.FilePath, source.FileName)
+		return r.getBody(uri, r.dt.Jar)
+	}
+
+	serverTime, err := r.getPhysicalFileTime()
+	if err != nil {
+		return nil, err
+	}
+	count := tianyigeSliceCount(source.FileInfoId)
+	slices := make([][]byte, count)
+	workers := config.Conf.Threads
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > count {
+		workers = count
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				requestID := tianyigeBase58(fmt.Sprintf("%d.%s.%d", i, source.FileInfoId, serverTime))
+				uri := fmt.Sprintf("https://%s/g/sw-file/physicalFile/getSplittedFile?requestId=%s", r.dt.UrlParsed.Host, url.QueryEscape(requestID))
+				body, err := r.getBody(uri, r.dt.Jar)
+				if err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("获取图像分片 %d/%d: %w", i, count, err)
+					}
+					errMu.Unlock()
+					continue
+				}
+				slices[i-1] = body
+			}
+		}()
+	}
+	for i := 1; i <= count; i++ {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return stitchTianyigeSlices(slices, count)
+}
+
+func (r *Tianyige) queryImageFiles(imageID string) ([]tianyige.FileInfo, error) {
+	apiURL := fmt.Sprintf("https://%s/g/sw-anb/api/queryOcrFileByimageId?imageId=%s", r.dt.UrlParsed.Host, url.QueryEscape(imageID))
+	body, err := r.getBody(apiURL, r.dt.Jar)
+	if err != nil {
+		return nil, err
+	}
+	var response tianyige.ResponseFile
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+	if response.Code != 0 && response.Code != 200 {
+		return nil, fmt.Errorf("图像接口返回 code %d: %s", response.Code, response.Msg)
+	}
+	return response.Data.File, nil
+}
+
+func (r *Tianyige) getPhysicalFileTime() (int64, error) {
+	uri := fmt.Sprintf("https://%s/g/sw-file/physicalFile/currentTime", r.dt.UrlParsed.Host)
+	body, err := r.getBody(uri, r.dt.Jar)
+	if err != nil {
+		return 0, err
+	}
+	var response struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data int64  `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return 0, err
+	}
+	if response.Code != 0 && response.Code != 200 {
+		return 0, fmt.Errorf("服务器时间接口返回 code %d: %s", response.Code, response.Msg)
+	}
+	if response.Data <= 0 {
+		return 0, errors.New("服务器时间为空")
+	}
+	return response.Data, nil
+}
+
+const tianyigeBase58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+// tianyigeBase58 mirrors the small encoder embedded in the Tianyige reader.
+// The input used by the site is ASCII, so byte and UTF-16 code-unit iteration
+// are equivalent here.
+func tianyigeBase58(input string) string {
+	digits := []int{0}
+	for i := 0; i < len(input); i++ {
+		carry := int(input[i])
+		for j := range digits {
+			carry += digits[j] << 8
+			digits[j] = carry % 58
+			carry /= 58
+		}
+		for carry > 0 {
+			digits = append(digits, carry%58)
+			carry /= 58
+		}
+	}
+	var out strings.Builder
+	for i := 0; i < len(input) && input[i] == 0; i++ {
+		out.WriteByte('1')
+	}
+	for i := len(digits) - 1; i >= 0; i-- {
+		out.WriteByte(tianyigeBase58Alphabet[digits[i]])
+	}
+	return out.String()
+}
+
+func tianyigeSliceCount(fileInfoID string) int {
+	count := 8
+	if len(fileInfoID) >= 2 {
+		firstEven := fileInfoID[0]%2 == 0
+		secondEven := fileInfoID[1]%2 == 0
+		switch {
+		case firstEven && secondEven:
+			count = 12
+		case firstEven && !secondEven:
+			count = 9
+		case !firstEven && secondEven:
+			count = 8
+		default:
+			count = 6
+		}
+	}
+	return count
+}
+
+func stitchTianyigeSlices(raw [][]byte, count int) ([]byte, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("没有图像分片")
+	}
+	columns := 4
+	if count == 6 || count == 9 {
+		columns = 3
+	}
+	rows := (len(raw) + columns - 1) / columns
+	images := make([]image.Image, len(raw))
+	colWidths := make([]int, columns)
+	rowHeights := make([]int, rows)
+	for i, body := range raw {
+		img, _, err := image.Decode(bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("解析图像分片 %d: %w", i+1, err)
+		}
+		images[i] = img
+		col := i % columns
+		row := i / columns
+		if img.Bounds().Dx() > colWidths[col] {
+			colWidths[col] = img.Bounds().Dx()
+		}
+		if img.Bounds().Dy() > rowHeights[row] {
+			rowHeights[row] = img.Bounds().Dy()
+		}
+	}
+	width, height := 0, 0
+	for _, w := range colWidths {
+		width += w
+	}
+	for _, h := range rowHeights {
+		height += h
+	}
+	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
+	y := 0
+	for row := 0; row < rows; row++ {
+		x := 0
+		for col := 0; col < columns; col++ {
+			i := row*columns + col
+			if i < len(images) {
+				draw.Draw(canvas, image.Rect(x, y, x+images[i].Bounds().Dx(), y+images[i].Bounds().Dy()), images[i], images[i].Bounds().Min, draw.Src)
+			}
+			x += colWidths[col]
+		}
+		y += rowHeights[row]
+	}
+	var out bytes.Buffer
+	if strings.EqualFold(config.Conf.FileExt, ".png") {
+		if err := png.Encode(&out, canvas); err != nil {
+			return nil, err
+		}
+	} else {
+		quality := config.Conf.Quality
+		if quality < 1 || quality > 100 {
+			quality = 90
+		}
+		if err := jpeg.Encode(&out, canvas, &jpeg.Options{Quality: quality}); err != nil {
+			return nil, err
+		}
+	}
+	return out.Bytes(), nil
 }
 
 func (r *Tianyige) getVolumes(catalogId string, jar *cookiejar.Jar) (volumes []tianyige.Volume, err error) {
@@ -288,6 +499,8 @@ func (r *Tianyige) getBody(sUrl string, jar *cookiejar.Jar) ([]byte, error) {
 		CookieJar:  jar,
 		Headers: map[string]interface{}{
 			"User-Agent":     config.Conf.UserAgent,
+			"Referer":        r.dt.Url,
+			"Origin":         "https://" + r.dt.UrlParsed.Host,
 			"Content-Type":   "application/json;charset=UTF-8",
 			"token":          token,
 			"appId":          TIANYIGE_ID,
@@ -316,6 +529,8 @@ func (r *Tianyige) postBody(sUrl string, d []byte, jar *cookiejar.Jar) ([]byte, 
 		CookieJar:  jar,
 		Headers: map[string]interface{}{
 			"User-Agent":     config.Conf.UserAgent,
+			"Referer":        r.dt.Url,
+			"Origin":         "https://" + r.dt.UrlParsed.Host,
 			"Content-Type":   "application/json;charset=UTF-8",
 			"token":          token,
 			"appId":          TIANYIGE_ID,

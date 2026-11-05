@@ -101,6 +101,8 @@ func FactoryRouter(siteID string, sUrl string) (map[string]interface{}, error) {
 		registerRouter("gjsztsg.sdutcm.edu.cn", app.NewSdutcm)
 		//[中国]山东省古籍数字资源平台
 		registerRouter("guji.sdlib.com", app.NewSdlib)
+		registerRouter("guji.sdlib.cn", app.NewSdlib)
+		registerRouter("www.guji.sdlib.cn", app.NewSdlib)
 
 		//[中国]天津图书馆历史文献数字资源库
 		registerRouter("lswx.tjl.tj.cn:8001", app.NewTjlswx)

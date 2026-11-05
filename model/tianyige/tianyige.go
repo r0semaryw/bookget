@@ -43,18 +43,20 @@ type ResponseFile struct {
 	Code int    `json:"code"`
 	Msg  string `json:"msg"`
 	Data struct {
-		File []struct {
-			FileName    string `json:"fileName"`
-			FileSuffix  string `json:"fileSuffix"`
-			FilePath    string `json:"filePath"`
-			UpdateTime  string `json:"updateTime"`
-			Sort        string `json:"sort"`
-			CreateTime  string `json:"createTime"`
-			FileSize    int    `json:"fileSize"`
-			FileOldname string `json:"fileOldname"`
-			FileInfoId  string `json:"fileInfoId"`
-		} `json:"file"`
+		File []FileInfo `json:"file"`
 	} `json:"data"`
+}
+
+type FileInfo struct {
+	FileName    string `json:"fileName"`
+	FileSuffix  string `json:"fileSuffix"`
+	FilePath    string `json:"filePath"`
+	UpdateTime  string `json:"updateTime"`
+	Sort        string `json:"sort"`
+	CreateTime  string `json:"createTime"`
+	FileSize    int    `json:"fileSize"`
+	FileOldname string `json:"fileOldname"`
+	FileInfoId  string `json:"fileInfoId"`
 }
 
 type Volume struct {

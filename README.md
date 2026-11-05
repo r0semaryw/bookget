@@ -61,6 +61,26 @@ bookget -I cadal_urls.txt -H header.txt
 
 使用 `-i` 或直接启动程序后输入 URL 时，下载内容会先保存到 `-O` 指定目录下按书籍标识创建的独立子目录中，不会直接写入 `downloads` 根目录。
 
+### 山东省古籍数字资源平台（guji.sdlib.cn）
+
+支持形如 `https://guji.sdlib.cn/#/reader/<书籍ID>?treeId=...` 的阅读器链接。程序会从阅读器的公开接口读取书目信息和总页数，再逐页取得 `fileId`，通过 `getEncryptedPdf` 下载原始扫描页。该站点返回的是单页 PDF，因此文件保存为 `0001.pdf`、`0002.pdf` 等；使用 `-p` 可限制页码范围。
+
+```shell
+bookget -i 'https://guji.sdlib.cn/#/reader/150113020240030?treeId=1972855219116380162' -p 1:3
+```
+
+本示例不需要把 URL 中的 `treeId` 单独提取出来，也不需要模板批量模式。若目标书需要登录，可按站点实际情况用 `-H header.txt` 或 `-C cookies.txt` 提供会话信息。
+
+### 天一阁古籍数字化平台（gj.tianyige.com.cn）
+
+支持 `#/Book?catalogId=...&fascicleId=...&directoryId=...&imageId=...` 阅读器链接。当前阅读器先通过 `queryOcrFileByimageId` 找到原始文件，再使用服务器时间和 Base58 请求标识取得 6、8、9 或 12 个图像分片；bookget 会按阅读器的列数和行数重新拼接为一张完整 JPG（`--ext .png` 时输出 PNG）。同一目录下还会保存 `catalog.txt`。
+
+```shell
+bookget -i 'https://gj.tianyige.com.cn/#/Book?catalogId=f4f1a787ec07969915568bd874a9902c&fascicleId=b2063e4a596e3ff7fd1141a15b54be51&directoryId=bedb257f5a16b5c7ae08e88a74657df5&imageId=52815762b754513d9babd4e1960af6ae' -p 1:3 --sleep 0
+```
+
+程序下载的是网页当前允许读取的原始图像分片；若站点返回权限或验证码错误，应先在浏览器完成登录/验证，再通过 `-H` 或 `-C` 传入会话信息。不要提交包含 Cookie 的文件。
+
 ### 山东大学图书馆特藏资源
 
 山东大学特藏详情页（例如 `https://tclib.sdu.edu.cn/portal-tsxq.html?id=3638`）的书目信息和目录接口可以公开访问，但阅读图像接口要求登录。程序会自动调用详情页接口、阅读权限接口，并按阅读器返回的页序下载 `large.jpg` 图像。
