@@ -28,6 +28,36 @@ make release        # 编译所有平台
 
 模板没有 `.jpg`、`.pdf`、`.html` 或 `.json` 扩展名时，下载器会使用默认扩展名作为临时文件名，并根据实际媒体类型保存最终文件。
 
+### 洛阳市图书馆古籍（111.7.82.29:8090）
+
+支持 `productshow.php?cid=...&id=...` 详情页和 `viewer.php?pdf=...` 阅读页，使用普通模式即可。详情页中的各册入口指向 PDF.js 阅读器，`pdf` 参数就是整册扫描 PDF 的地址；程序按网页册序下载原始 PDF，不转换或重新压缩。目前示例《試帖百篇最豁解》无需登录。
+
+```shell
+# 下载详情页中列出的所有册
+./bookget-linux -i 'http://111.7.82.29:8090/productshow.php?cid=5&id=365'
+
+# 多册书只下载第 1 册
+./bookget-linux -i 'http://111.7.82.29:8090/productshow.php?cid=5&id=365' -v 1:1
+
+# 多本书，每行放一个完整详情页 URL
+./bookget-linux -I luoyang_urls.txt
+```
+
+也可直接启动后输入 URL。输出位于该 URL 的独立目录下的 `书名-书籍ID/`，各册保存为 `0001.pdf`、`0002.pdf` 等，`urls.txt` 保存完整册清单。链接必须用引号包住，避免 shell 将 `&` 当作后台执行符。
+
+该站按整册传输，使用 `-v` 选册；`-p` 会明确报错，不会裁切 PDF。下载采用单连接流式写入，不使用 `-n` 分片并发；`--timeout 300s` 可设置单次请求超时，`--retries` 控制失败重试次数。重新执行相同命令会跳过具有 PDF 文件头和结束标记的已完成文件；失败或中断的册重新下载，不做字节级断点续传。下载内容长度与 PDF 首尾标记检查通过后才保存为正式文件，HTTP 错误和登录 HTML 不会当作 PDF 保存。
+
+### 国立公文书馆数字档案（digital.archives.go.jp）
+
+新版站点使用 IIIF 阅读器，普通 URL 模式即可下载。请使用具体的 `/img/<id>` 阅读器链接，或使用包含“閲覧”入口的 `/file/<id>`、`/item/<id>` 详情链接；首页没有具体档案，程序会提示需要提供条目链接。
+
+```shell
+./bookget-linux -i 'https://www.digital.archives.go.jp/img/5104580'
+./bookget-linux -i 'https://www.digital.archives.go.jp/file/3529084'
+```
+
+程序读取 `/api/iiif/<id>/manifest.json`，按画布保存 JPG，并验证实际图像内容后才保留文件。默认使用 IIIF 分片拼图；使用 `-d=false` 时请求站点提供的整图地址。多条目 `/file/<id>` 会按条目写入 `vol.0001`、`vol.0002` 等子目录；重复运行会跳过已完成页面。
+
 ### CADAL 阅读器
 
 CADAL 阅读器页面可直接使用普通 URL 模式下载，程序会从阅读器接口获取图像路径并按页保存为 JPG。需要使用已登录 CADAL 会话导出的 Cookie：

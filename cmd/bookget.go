@@ -51,11 +51,15 @@ func initializeConfig(ctx context.Context) bool {
 func executeByRunMode(ctx context.Context) {
 	switch determineRunMode() {
 	case RunModeSingleURL:
-		executeSingleURL(ctx, config.Conf.DUrl)
+		if !executeSingleURL(ctx, config.Conf.DUrl) {
+			return
+		}
 	case RunModeBatchURLs:
 		executeBatchURLs()
 	case RunModeInteractive:
-		runInteractiveMode(ctx)
+		if !runInteractiveMode(ctx) {
+			return
+		}
 	case RunModeInteractiveImage:
 		runInteractiveModeImage(ctx)
 	}
@@ -93,10 +97,12 @@ func hasValidURLsFile() bool {
 }
 
 // executeSingleURL 处理单个URL模式
-func executeSingleURL(ctx context.Context, rawUrl string) {
+func executeSingleURL(ctx context.Context, rawUrl string) bool {
 	if err := processURL(ctx, rawUrl); err != nil {
 		log.Println(err)
+		return false
 	}
+	return true
 }
 
 // executeBatchURLs 处理批量URLs模式
@@ -124,8 +130,9 @@ func executeBatchURLs() {
 }
 
 // runInteractiveMode 运行交互模式
-func runInteractiveMode(ctx context.Context) {
+func runInteractiveMode(ctx context.Context) bool {
 	//cleanupCookieFile()
+	success := true
 	for {
 		rawUrl, err := readURLFromInput()
 		if err != nil {
@@ -134,8 +141,10 @@ func runInteractiveMode(ctx context.Context) {
 
 		if err = processURL(ctx, rawUrl); err != nil {
 			log.Println(err)
+			success = false
 		}
 	}
+	return success
 }
 
 // runInteractiveModeImage 运行交互模式：图片下载
